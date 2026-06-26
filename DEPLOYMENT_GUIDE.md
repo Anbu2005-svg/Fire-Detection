@@ -35,6 +35,25 @@ gunicorn --workers 1 --threads 4 --bind 0.0.0.0:5000 app_flask:app
 
 Scale with additional processes only when the host has enough memory for one model copy per process. For GPU deployments, benchmark worker count carefully because each process can allocate GPU memory.
 
+## Server-side notifications
+
+Telegram bot notifications are the recommended free alert channel. Store tokens only in environment variables or a local `.env` file that is not committed.
+
+```powershell
+$env:NOTIFICATION_CHANNELS="telegram"
+$env:TELEGRAM_BOT_TOKEN="123456:your_bot_token"
+$env:TELEGRAM_CHAT_ID="123456789"
+$env:SERVER_PUBLIC_URL="https://your-domain.example"
+```
+
+Send a test alert after startup:
+
+```powershell
+Invoke-RestMethod -Method Post https://your-domain.example/api/notifications/test
+```
+
+For custom alert pipelines, set `WEBHOOK_URL` and `NOTIFICATION_CHANNELS=telegram,webhook`. The webhook receives JSON with the event name, alert message, detection metadata, and evidence URL.
+
 ## Reverse proxy
 
 Place the app behind HTTPS in production. Configure the proxy to:
@@ -82,4 +101,5 @@ Use `GET /api/health`. A healthy response has `model_loaded: true`. A server can
 - Keep `CORS_ORIGINS` restricted to trusted frontend origins when the API is exposed separately.
 - IP-camera streams allow private camera IP addresses by default. Add named cameras to `ALLOWED_STREAM_HOSTS`; do not use `*` on an internet-facing server.
 - API routes send no-store cache headers, rate-limit repeated calls, and add browser security headers by default.
+- Keep `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and `WEBHOOK_URL` out of source control.
 - Keep debug mode disabled in production.

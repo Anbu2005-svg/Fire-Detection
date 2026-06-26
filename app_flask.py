@@ -6,6 +6,7 @@ import base64
 import binascii
 import ipaddress
 import io
+import json
 import os
 import sqlite3
 import threading
@@ -14,6 +15,8 @@ from collections import Counter, deque
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 import cv2
 import numpy as np
@@ -25,6 +28,26 @@ from werkzeug.utils import safe_join
 
 
 BASE_DIR = Path(__file__).resolve().parent
+
+
+def _load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_env_file(BASE_DIR / ".env")
+
 FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
 DATA_DIR = BASE_DIR / "data"
 DETECTION_DIR = DATA_DIR / "detections"
@@ -58,6 +81,15 @@ CORS_ORIGINS = [
     for origin in os.getenv("CORS_ORIGINS", DEFAULT_CORS_ORIGINS).split(",")
     if origin.strip()
 ]
+SERVER_PUBLIC_URL = os.getenv("SERVER_PUBLIC_URL", "").strip().rstrip("/")
+NOTIFICATION_ENABLED = os.getenv("NOTIFICATION_ENABLED", "1") != "0"
+NOTIFICATION_CHANNELS_RAW = os.getenv("NOTIFICATION_CHANNELS", "").strip()
+NOTIFICATION_COOLDOWN_SECONDS = int(os.getenv("NOTIFICATION_COOLDOWN_SECONDS", "120"))
+NOTIFICATION_TIMEOUT_SECONDS = float(os.getenv("NOTIFICATION_TIMEOUT_SECONDS", "8"))
+NOTIFICATION_MIN_CONFIDENCE = float(os.getenv("NOTIFICATION_MIN_CONFIDENCE", "0"))
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
 
 # Class names for the fire detection model
 CLASS_NAMES = {0: "fire", 1: "smoke"}
@@ -76,8 +108,10 @@ inference_lock = threading.Lock()
 database_lock = threading.Lock()
 live_history_lock = threading.Lock()
 rate_limit_lock = threading.Lock()
+notification_lock = threading.Lock()
 rate_limit_hits: dict[str, deque[float]] = {}
 last_live_history_at = 0.0
+last_notification_at = 0.0
 
 
 def _normalize_hostname(host_value: str) -> str:
@@ -154,6 +188,177 @@ def _stream_hostname_is_allowed(hostname: str) -> bool:
         return _ip_is_allowed_camera_target(ipaddress.ip_address(normalized))
     except ValueError:
         return False
+
+
+def _configured_notification_channels() -> list[str]:
+    if not NOTIFICATION_ENABLED:
+        return []
+
+    requested = {
+        channel.strip().lower()
+        for channel in NOTIFICATION_CHANNELS_RAW.split(",")
+        if channel.strip()
+    }
+    if not requested:
+        requested = set()
+        if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+            requested.add("telegram")
+        if WEBHOOK_URL:
+            requested.add("webhook")
+
+    channels: list[str] = []
+    if "telegram" in requested and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        channels.append("telegram")
+    if "webhook" in requested and _webhook_url_is_valid(WEBHOOK_URL):
+        channels.append("webhook")
+    return channels
+
+
+def _webhook_url_is_valid(url: str) -> bool:
+    if not url:
+        return False
+    parsed = urlparse(url)
+    return parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc)
+
+
+def _public_url_for_path(path: str) -> str | None:
+    if not SERVER_PUBLIC_URL:
+        return None
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return f"{SERVER_PUBLIC_URL}{path}"
+
+
+def _format_label_counts(labels: dict) -> str:
+    if not labels:
+        return "fire or smoke"
+    return ", ".join(f"{label}: {count}" for label, count in labels.items())
+
+
+def _build_notification_message(history_item: dict) -> str:
+    source = history_item["source"].replace("-", " ")
+    labels = _format_label_counts(history_item.get("labels", {}))
+    created_at = history_item["created_at"].replace("T", " ").replace("+00:00", " UTC")
+    lines = [
+        "EmberWatch hazard alert",
+        f"Source: {source}",
+        f"Detections: {history_item['detection_count']}",
+        f"Labels: {labels}",
+        f"Top confidence: {history_item['top_confidence']:.1f}%",
+        f"Time: {created_at}",
+    ]
+
+    evidence_url = _public_url_for_path(history_item.get("image_url", ""))
+    if evidence_url:
+        lines.append(f"Evidence: {evidence_url}")
+    return "\n".join(lines)
+
+
+def _post_json(url: str, payload: dict) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        raise RuntimeError("Notification URL must use HTTP or HTTPS")
+
+    body = json.dumps(payload).encode("utf-8")
+    request_obj = urllib_request.Request(
+        url,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "EmberWatch/3.0",
+        },
+        method="POST",
+    )
+    with urllib_request.urlopen(request_obj, timeout=NOTIFICATION_TIMEOUT_SECONDS) as response:  # nosec B310
+        if not 200 <= response.status < 300:
+            raise RuntimeError(f"Notification endpoint returned HTTP {response.status}")
+
+
+def _send_telegram_notification(message: str) -> None:
+    api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    _post_json(
+        api_url,
+        {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "disable_web_page_preview": False,
+        },
+    )
+
+
+def _send_webhook_notification(history_item: dict, message: str) -> None:
+    _post_json(
+        WEBHOOK_URL,
+        {
+            "event": "emberwatch.hazard_detected",
+            "message": message,
+            "detection": history_item,
+            "evidence_url": _public_url_for_path(history_item.get("image_url", "")),
+            "sent_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+
+
+def _should_send_server_notification(history_item: dict) -> bool:
+    global last_notification_at
+
+    if not history_item.get("hazard_detected"):
+        return False
+    if history_item.get("top_confidence", 0) < NOTIFICATION_MIN_CONFIDENCE:
+        return False
+    if not _configured_notification_channels():
+        return False
+
+    with notification_lock:
+        now = time.monotonic()
+        if now - last_notification_at < NOTIFICATION_COOLDOWN_SECONDS:
+            return False
+        last_notification_at = now
+        return True
+
+
+def _send_server_notifications(history_item: dict) -> list[dict]:
+    message = _build_notification_message(history_item)
+    results = []
+    for channel in _configured_notification_channels():
+        try:
+            if channel == "telegram":
+                _send_telegram_notification(message)
+            elif channel == "webhook":
+                _send_webhook_notification(history_item, message)
+            app.logger.info("Sent %s notification for detection %s", channel, history_item["id"])
+            results.append({"channel": channel, "success": True})
+        except (urllib_error.URLError, TimeoutError, RuntimeError, OSError):
+            app.logger.exception(
+                "Unable to send %s notification for detection %s",
+                channel,
+                history_item["id"],
+            )
+            results.append({"channel": channel, "success": False})
+    return results
+
+
+def _notify_hazard_async(history_item: dict) -> None:
+    if not _should_send_server_notification(history_item):
+        return
+
+    worker = threading.Thread(
+        target=_send_server_notifications,
+        args=(history_item,),
+        daemon=True,
+        name="emberwatch-notifier",
+    )
+    worker.start()
+
+
+def _notification_status() -> dict:
+    return {
+        "enabled": NOTIFICATION_ENABLED,
+        "configured_channels": _configured_notification_channels(),
+        "cooldown_seconds": NOTIFICATION_COOLDOWN_SECONDS,
+        "minimum_confidence": NOTIFICATION_MIN_CONFIDENCE,
+        "public_url_configured": bool(SERVER_PUBLIC_URL),
+    }
 
 
 def _database_connection() -> sqlite3.Connection:
@@ -444,6 +649,7 @@ def detect():
                 processing_ms=processing_ms,
                 image_bytes=output_bytes,
             )
+            _notify_hazard_async(history_item)
 
         return jsonify(
             {
@@ -543,8 +749,6 @@ def _record_detection(
     processing_ms: float,
     image_bytes: bytes,
 ) -> dict:
-    import json
-
     created_at = datetime.now(timezone.utc).isoformat()
     filename = f"detection-{time.time_ns()}.jpg"
     (DETECTION_DIR / filename).write_bytes(image_bytes)
@@ -603,8 +807,6 @@ def _record_detection(
 
 
 def _serialize_history_row(row: sqlite3.Row) -> dict:
-    import json
-
     return {
         "id": row["id"],
         "created_at": row["created_at"],
@@ -765,6 +967,43 @@ def clear_detection_history():
     return jsonify({"success": True})
 
 
+@app.post("/api/notifications/test")
+def test_server_notification():
+    channels = _configured_notification_channels()
+    if not channels:
+        return jsonify(
+            {
+                "success": False,
+                "error": "No server notification channel is configured",
+                "notifications": _notification_status(),
+            }
+        ), 503
+
+    now = datetime.now(timezone.utc).isoformat()
+    test_item = {
+        "id": "test",
+        "created_at": now,
+        "source": "notification-test",
+        "hazard_detected": True,
+        "detection_count": 1,
+        "top_confidence": 99.0,
+        "average_confidence": 99.0,
+        "inference_ms": 0,
+        "processing_ms": 0,
+        "labels": {"fire": 1},
+        "image_url": "/",
+    }
+    results = _send_server_notifications(test_item)
+    success = any(result["success"] for result in results)
+    return jsonify(
+        {
+            "success": success,
+            "results": results,
+            "notifications": _notification_status(),
+        }
+    ), 200 if success else 502
+
+
 @app.get("/api/health")
 def health():
     return jsonify(
@@ -772,6 +1011,7 @@ def health():
             "status": "ok" if session is not None else "degraded",
             "model_loaded": session is not None,
             "model": MODEL_PATH.name,
+            "notifications": _notification_status(),
         }
     )
 
@@ -787,11 +1027,13 @@ def info():
             "inference_size": INFERENCE_SIZE,
             "model_input_shape": input_shape,
             "model_warmup": MODEL_WARMUP,
+            "notifications": _notification_status(),
             "endpoints": {
                 "/api/detect": "POST multipart/form-data or JSON base64 image",
                 "/api/history": "GET or DELETE detection history",
                 "/api/health": "GET service and model health",
                 "/api/info": "GET API configuration",
+                "/api/notifications/test": "POST test server-side notifications",
             },
         }
     )

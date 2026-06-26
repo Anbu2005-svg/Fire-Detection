@@ -9,6 +9,7 @@ EmberWatch is an interactive fire and smoke screening website powered by an ONNX
 - HTTP, HTTPS, RTSP, and RTSPS IP-camera viewing
 - Adjustable detection sensitivity
 - Browser notifications and audible hazard alerts
+- Free server-side Telegram alerts and optional webhook alerts
 - Persistent detection history with annotated evidence
 - Downloadable results
 - Optional Supabase operator authentication
@@ -62,6 +63,32 @@ VITE_SUPABASE_ANON_KEY=
 
 Set `VITE_AUTH_REQUIRED=true` and supply a Supabase project URL and anon key to require operator accounts. Rebuild the frontend after changing Vite environment variables.
 
+## Server-side notifications
+
+Telegram is the recommended free server-side alert method. SMS and WhatsApp usually need a paid provider account, while Telegram bot messages can be sent directly from Flask with a bot token and chat ID. Webhooks are also supported for custom integrations.
+
+1. In Telegram, message `@BotFather` and create a bot with `/newbot`.
+2. Copy `.env.example` to `.env` in the project root.
+3. Paste the bot token into `TELEGRAM_BOT_TOKEN`.
+4. Send any message to your new bot.
+5. Open `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` in a browser and copy `message.chat.id` into `TELEGRAM_CHAT_ID`.
+6. Restart Flask and test:
+
+```powershell
+Invoke-RestMethod -Method Post http://127.0.0.1:5000/api/notifications/test
+```
+
+Minimal `.env` example:
+
+```env
+NOTIFICATION_CHANNELS=telegram
+TELEGRAM_BOT_TOKEN=123456:your_bot_token
+TELEGRAM_CHAT_ID=123456789
+SERVER_PUBLIC_URL=http://127.0.0.1:5000
+```
+
+For a webhook receiver, set `WEBHOOK_URL=https://example.com/alerts` and use `NOTIFICATION_CHANNELS=telegram,webhook`.
+
 ## API
 
 - `POST /api/detect` analyzes an uploaded image.
@@ -69,6 +96,7 @@ Set `VITE_AUTH_REQUIRED=true` and supply a Supabase project URL and anon key to 
 - `GET /api/history` lists recent analyses.
 - `DELETE /api/history/:id` deletes one history item.
 - `DELETE /api/history` clears all history.
+- `POST /api/notifications/test` sends a test server-side notification.
 - `GET /api/health` reports model availability.
 - `GET /api/info` reports model and API configuration.
 
@@ -91,6 +119,14 @@ Set `VITE_AUTH_REQUIRED=true` and supply a Supabase project URL and anon key to 
 | `API_RATE_LIMIT_WINDOW_SECONDS` | `60` | Rate-limit window in seconds |
 | `SECURITY_HEADERS` | `1` | Send browser security headers |
 | `CONTENT_SECURITY_POLICY` | secure default | Override the default CSP if needed |
+| `SERVER_PUBLIC_URL` | empty | Public URL used in notification evidence links |
+| `NOTIFICATION_ENABLED` | `1` | Enable server-side Telegram/webhook alerts |
+| `NOTIFICATION_CHANNELS` | inferred | Comma-separated `telegram`, `webhook`, or both |
+| `NOTIFICATION_COOLDOWN_SECONDS` | `120` | Minimum seconds between server-side alerts |
+| `NOTIFICATION_MIN_CONFIDENCE` | `0` | Minimum top confidence percent required before alerting |
+| `TELEGRAM_BOT_TOKEN` | empty | Telegram bot token from `@BotFather` |
+| `TELEGRAM_CHAT_ID` | empty | Telegram user/group chat ID |
+| `WEBHOOK_URL` | empty | Optional HTTP/HTTPS webhook receiver |
 | `HOST` | `127.0.0.1` | Flask bind address; set `0.0.0.0` only for trusted LAN/deployments |
 | `PORT` | `5000` | Flask port |
 | `FLASK_DEBUG` | `0` | Enable Flask debug mode |
