@@ -12,13 +12,47 @@ import cv2
 import numpy as np
 from PIL import Image
 import os
+import sys
+
+# Optional: allow downloading the model from a URL if it's not present in the repo
+# Set the MODEL_URL environment variable to a direct download link (eg. an S3 presigned URL)
+import requests
+
+def ensure_model(model_path: str):
+    """Ensure model file exists. If not and MODEL_URL is set, download it."""
+    if os.path.exists(model_path):
+        print(f"Model already present: {model_path}")
+        return True
+
+    model_url = os.getenv("MODEL_URL")
+    if not model_url:
+        print(f"Model file not found ({model_path}) and MODEL_URL not set. Skipping download.")
+        return False
+
+    try:
+        print(f"Downloading model from MODEL_URL: {model_url} -> {model_path}")
+        with requests.get(model_url, stream=True, timeout=60) as r:
+            r.raise_for_status()
+            with open(model_path, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+        print("Model download complete.")
+        return True
+    except Exception as e:
+        print(f"Failed to download model from MODEL_URL: {e}")
+        return False
+
 
 # Initialize Flask app
 app = Flask(__name__)
 CORS(app)
 
 # Load YOLOv8 model
-MODEL_PATH = "best.pt"
+MODEL_PATH = os.getenv('MODEL_PATH', 'best.pt')
+# Try to ensure model is present (will download if MODEL_URL provided)
+ensure_model(MODEL_PATH)
+
 try:
     model = YOLO(MODEL_PATH)
     print(f"✓ Model loaded: {MODEL_PATH}")
@@ -57,7 +91,7 @@ def detect():
         # Get image data from request
         data = request.json
         
-        if 'image' not in data:
+        if not data or 'image' not in data:
             return jsonify({'success': False, 'error': 'No image provided'}), 400
 
         # Decode base64 image
@@ -110,39 +144,3 @@ def detect():
     except Exception as e:
         print(f"Error during detection: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/health', methods=['GET'])
-def health():
-    """Health check endpoint"""
-    return jsonify({
-        'status': 'ok',
-        'model_loaded': model is not None,
-        'model_path': MODEL_PATH
-    })
-
-
-@app.route('/api/info', methods=['GET'])
-def info():
-    """Get API information"""
-    return jsonify({
-        'name': 'Fire Detection API',
-        'version': '1.0.0',
-        'description': 'Real-time fire and smoke detection using YOLOv8',
-        'model': 'YOLOv8',
-        'model_file': MODEL_PATH,
-        'endpoints': {
-            '/api/detect': 'POST - Detect fire in image',
-            '/api/health': 'GET - Health check',
-            '/api/info': 'GET - API information'
-        }
-    })
-
-
-if __name__ == '__main__':
-    print("🔥 Fire Detection Server Starting...")
-    print("Starting Flask server on http://localhost:5000")
-    print("Make sure best.pt is in the same directory")
-    
-    # Run the app
-    app.run(debug=True, host='0.0.0.0', port=5000)
