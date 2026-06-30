@@ -7,7 +7,8 @@ export default function ForgotPassword() {
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
-  const { resetPassword } = useAuth();
+  const { authRequired, isConfigured, resetPassword } = useAuth();
+  const configurationMissing = authRequired && !isConfigured;
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -53,11 +54,17 @@ export default function ForgotPassword() {
           <button 
             type="submit" 
             className="button button-primary auth-submit"
-            disabled={loading}
+            disabled={loading || configurationMissing}
           >
             {loading ? 'Sending...' : 'Send reset link'}
           </button>
         </form>
+
+        {configurationMissing && (
+          <div className="auth-error">
+            Supabase is not configured yet. Add the frontend environment values before sending reset links.
+          </div>
+        )}
 
         <div className="auth-footer">
           <Link to="/login" className="back-link">

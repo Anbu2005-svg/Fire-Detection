@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
+import { authFetch } from '../utils/apiClient';
 
 const API_URL = '';
 
@@ -30,7 +31,7 @@ export function useLiveDetection() {
 
       try {
         abortRef.current = new AbortController();
-        const res = await fetch(`${API_URL}/api/detect`, {
+        const res = await authFetch(`${API_URL}/api/detect`, {
           method: 'POST',
           body: formData,
           signal: abortRef.current.signal,

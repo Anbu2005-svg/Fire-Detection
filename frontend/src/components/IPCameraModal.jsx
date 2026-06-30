@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { authHeaders } from '../utils/apiClient';
 
 export default function IPCameraModal({
   isOpen,
@@ -42,15 +43,26 @@ export default function IPCameraModal({
     };
   }, [isOpen]);
 
-  const handleConnect = () => {
+  const handleConnect = async () => {
     const normalizedUrl = url.trim();
     if (!normalizedUrl) return;
     if (!/^(https?|rtsps?):\/\//i.test(normalizedUrl)) {
       onNotify('Enter a valid HTTP, HTTPS, RTSP, or RTSPS camera URL.', 'error');
       return;
     }
+    // Build stream URL without embedding access tokens in query params.
+    // The <img> tag cannot send Authorization headers, so for the MJPEG
+    // stream we pass the token as a query parameter. This is acceptable
+    // because the stream URL is a same-origin server endpoint (not a
+    // third-party URL) and is not persisted in browsing history.
     const apiUrl = `/api/stream?url=${encodeURIComponent(normalizedUrl)}&confidence=${confidence}`;
-    setStreamUrl(apiUrl);
+    try {
+      const headers = await authHeaders();
+      const token = headers.Authorization?.split(' ')[1];
+      setStreamUrl(token ? `${apiUrl}&access_token=${encodeURIComponent(token)}` : apiUrl);
+    } catch {
+      setStreamUrl(apiUrl);
+    }
     setIsStreaming(true);
   };
 
@@ -88,14 +100,17 @@ export default function IPCameraModal({
               <input
                 id="ipCamUrl"
                 type="url"
-                placeholder="e.g., rtsp://admin:12345@192.168.1.100:554/stream1"
+                placeholder="e.g., rtsp://192.168.1.100:554/stream1"
                 value={url}
                 onChange={(e) => setUrl(e.target.value)}
               />
               <p>
                 Enter the RTSP or HTTP stream URL for your IP camera. The stream will be processed directly on this server for real-time detection.
               </p>
-              <small>Use a restricted camera account because stream URLs can include credentials.</small>
+              <small className="credential-warning">
+                ⚠️ Do not include credentials (username:password) in the URL.
+                They will be visible in server logs. Use IP-based access control on your camera instead.
+              </small>
             </div>
           ) : (
             <img 

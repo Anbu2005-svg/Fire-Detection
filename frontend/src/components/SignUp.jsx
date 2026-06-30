@@ -2,6 +2,18 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
+/**
+ * Validate password strength beyond just length.
+ * Returns an error message or null if valid.
+ */
+function validatePasswordStrength(password) {
+  if (password.length < 8) return 'Use at least 8 characters for the password.';
+  if (!/[a-z]/.test(password)) return 'Password must include at least one lowercase letter.';
+  if (!/[A-Z]/.test(password)) return 'Password must include at least one uppercase letter.';
+  if (!/[0-9]/.test(password)) return 'Password must include at least one number.';
+  return null;
+}
+
 export default function SignUp() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -9,15 +21,17 @@ export default function SignUp() {
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
-  const { signup } = useAuth();
+  const { authRequired, isConfigured, signup } = useAuth();
+  const configurationMissing = authRequired && !isConfigured;
 
   const handleSubmit = async (event) => {
     event.preventDefault();
     setError('');
     setMessage('');
 
-    if (password.length < 8) {
-      setError('Use at least 8 characters for the password.');
+    const strengthError = validatePasswordStrength(password);
+    if (strengthError) {
+      setError(strengthError);
       return;
     }
     if (password !== confirmPassword) {
@@ -71,6 +85,9 @@ export default function SignUp() {
               onChange={(event) => setPassword(event.target.value)}
               autoComplete="new-password"
             />
+            <small className="password-hint">
+              Minimum 8 characters with at least one uppercase letter, one lowercase letter, and one number.
+            </small>
           </div>
           <div className="form-group">
             <label htmlFor="confirmPassword">Confirm password</label>
@@ -84,10 +101,16 @@ export default function SignUp() {
               autoComplete="new-password"
             />
           </div>
-          <button className="button button-primary auth-submit" type="submit" disabled={loading}>
+          <button className="button button-primary auth-submit" type="submit" disabled={loading || configurationMissing}>
             {loading ? 'Creating account...' : 'Create account'}
           </button>
         </form>
+
+        {configurationMissing && (
+          <div className="auth-error">
+            Supabase is not configured yet. Add the frontend environment values before creating accounts.
+          </div>
+        )}
 
         <div className="auth-footer">
           <Link to="/login" className="back-link">Back to sign in</Link>

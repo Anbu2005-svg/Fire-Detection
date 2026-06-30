@@ -35,6 +35,30 @@ gunicorn --workers 1 --threads 4 --bind 0.0.0.0:5000 app_flask:app
 
 Scale with additional processes only when the host has enough memory for one model copy per process. For GPU deployments, benchmark worker count carefully because each process can allocate GPU memory.
 
+## Supabase authentication
+
+Set Supabase variables in the root `.env` file. Vite reads frontend `VITE_` values from the root because `frontend/vite.config.js` sets `envDir: '..'`.
+
+```powershell
+Copy-Item .env.example .env
+notepad .env
+cd frontend
+npm run build
+cd ..
+```
+
+For production process managers, the equivalent environment variables are:
+
+```powershell
+$env:VITE_AUTH_REQUIRED="true"
+$env:VITE_SUPABASE_URL="https://your-project-ref.supabase.co"
+$env:VITE_SUPABASE_ANON_KEY="your_supabase_anon_key"
+$env:SUPABASE_AUTH_REQUIRED="1"
+$env:SUPABASE_JWT_SECRET="your_supabase_jwt_secret"
+```
+
+The frontend anon key is safe to expose in the browser. The JWT secret is server-only and must never be committed.
+
 ## Server-side notifications
 
 Telegram bot notifications are the recommended free alert channel. Store tokens only in environment variables or a local `.env` file that is not committed.
@@ -101,5 +125,6 @@ Use `GET /api/health`. A healthy response has `model_loaded: true`. A server can
 - Keep `CORS_ORIGINS` restricted to trusted frontend origins when the API is exposed separately.
 - IP-camera streams allow private camera IP addresses by default. Add named cameras to `ALLOWED_STREAM_HOSTS`; do not use `*` on an internet-facing server.
 - API routes send no-store cache headers, rate-limit repeated calls, and add browser security headers by default.
+- Keep `SUPABASE_JWT_SECRET` server-side only. The frontend uses only the Supabase anon key.
 - Keep `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and `WEBHOOK_URL` out of source control.
 - Keep debug mode disabled in production.

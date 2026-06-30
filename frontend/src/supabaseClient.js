@@ -4,10 +4,11 @@ const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 
 const isConfigured = supabaseUrl.startsWith('http') && supabaseAnonKey.length > 10;
+const authRequired = import.meta.env.VITE_AUTH_REQUIRED === 'true';
 
-if (!isConfigured) {
+if (authRequired && !isConfigured) {
   console.warn(
-    'Supabase is not configured. Please update your .env file with:\n' +
+    'Supabase auth is required but not configured. Please update your .env file with:\n' +
     '  VITE_SUPABASE_URL=https://your-project.supabase.co\n' +
     '  VITE_SUPABASE_ANON_KEY=your-anon-key'
   );
@@ -19,4 +20,4 @@ export const supabase = isConfigured
   ? createClient(supabaseUrl, supabaseAnonKey)
   : null;
 
-export { isConfigured };
+export { authRequired, isConfigured };

@@ -1,4 +1,5 @@
 import { useState, useCallback } from 'react';
+import { authFetch } from '../utils/apiClient';
 
 const API_URL = '';
 const REQUEST_TIMEOUT_MS = 90_000;
@@ -19,7 +20,7 @@ export function useDetection() {
     formData.append('source', source);
 
     try {
-      const response = await fetch(`${API_URL}/api/detect`, {
+      const response = await authFetch(`${API_URL}/api/detect`, {
         method: 'POST',
         body: formData,
         signal: controller.signal,

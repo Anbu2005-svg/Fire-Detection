@@ -1,16 +1,17 @@
 import { createContext, useContext, useEffect, useState } from 'react';
-import { supabase, isConfigured } from '../supabaseClient';
+import { authRequired, supabase, isConfigured } from '../supabaseClient';
 
 const AuthContext = createContext({});
-const authRequired = import.meta.env.VITE_AUTH_REQUIRED === 'true';
 
 export const AuthProvider = ({ children }) => {
   const [session, setSession] = useState(null);
   const [user, setUser] = useState(null);
-  const [loading, setLoading] = useState(isConfigured);
+  const [loading, setLoading] = useState(authRequired && isConfigured);
 
   useEffect(() => {
-    if (!isConfigured || !supabase) return undefined;
+    if (!isConfigured || !supabase) {
+      return undefined;
+    }
 
     // Get active session
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -69,6 +70,13 @@ export const AuthProvider = ({ children }) => {
     if (error) throw error;
   };
 
+  const getAccessToken = async () => {
+    if (!isConfigured || !supabase) return null;
+    const { data, error } = await supabase.auth.getSession();
+    if (error) throw error;
+    return data.session?.access_token ?? null;
+  };
+
   return (
     <AuthContext.Provider
       value={{
@@ -79,6 +87,7 @@ export const AuthProvider = ({ children }) => {
         logout,
         resetPassword,
         updatePassword,
+        getAccessToken,
         loading,
         isConfigured,
         authRequired,

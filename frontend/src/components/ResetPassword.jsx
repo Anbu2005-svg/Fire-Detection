@@ -2,19 +2,34 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
+/**
+ * Validate password strength beyond just length.
+ * Returns an error message or null if valid.
+ */
+function validatePasswordStrength(password) {
+  if (password.length < 8) return 'Use at least 8 characters for the password.';
+  if (!/[a-z]/.test(password)) return 'Password must include at least one lowercase letter.';
+  if (!/[A-Z]/.test(password)) return 'Password must include at least one uppercase letter.';
+  if (!/[0-9]/.test(password)) return 'Password must include at least one number.';
+  return null;
+}
+
 export default function ResetPassword() {
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const { updatePassword } = useAuth();
+  const { authRequired, isConfigured, updatePassword } = useAuth();
   const navigate = useNavigate();
+  const configurationMissing = authRequired && !isConfigured;
 
   const handleSubmit = async (event) => {
     event.preventDefault();
     setError('');
-    if (password.length < 8) {
-      setError('Use at least 8 characters for the password.');
+
+    const strengthError = validatePasswordStrength(password);
+    if (strengthError) {
+      setError(strengthError);
       return;
     }
     if (password !== confirmPassword) {
@@ -54,6 +69,9 @@ export default function ResetPassword() {
               onChange={(event) => setPassword(event.target.value)}
               autoComplete="new-password"
             />
+            <small className="password-hint">
+              Minimum 8 characters with at least one uppercase letter, one lowercase letter, and one number.
+            </small>
           </div>
           <div className="form-group">
             <label htmlFor="resetPasswordConfirm">Confirm new password</label>
@@ -67,10 +85,15 @@ export default function ResetPassword() {
               autoComplete="new-password"
             />
           </div>
-          <button className="button button-primary auth-submit" type="submit" disabled={loading}>
+          <button className="button button-primary auth-submit" type="submit" disabled={loading || configurationMissing}>
             {loading ? 'Updating password...' : 'Update password'}
           </button>
         </form>
+        {configurationMissing && (
+          <div className="auth-error">
+            Supabase is not configured yet. Add the frontend environment values before updating passwords.
+          </div>
+        )}
       </div>
     </div>
   );

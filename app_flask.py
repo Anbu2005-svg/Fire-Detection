@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
+import hmac
 import ipaddress
 import io
 import json
@@ -90,6 +92,9 @@ NOTIFICATION_MIN_CONFIDENCE = float(os.getenv("NOTIFICATION_MIN_CONFIDENCE", "0"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
+SUPABASE_AUTH_REQUIRED = os.getenv("SUPABASE_AUTH_REQUIRED", "0") == "1"
+SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET", "").strip()
+
 
 # Class names for the fire detection model
 CLASS_NAMES = {0: "fire", 1: "smoke"}
@@ -110,6 +115,7 @@ live_history_lock = threading.Lock()
 rate_limit_lock = threading.Lock()
 notification_lock = threading.Lock()
 rate_limit_hits: dict[str, deque[float]] = {}
+RATE_LIMIT_MAX_KEYS = 10000
 last_live_history_at = 0.0
 last_notification_at = 0.0
 
@@ -151,6 +157,15 @@ def _rate_limit_response():
     key = _client_rate_limit_key()
 
     with rate_limit_lock:
+        # Evict stale keys to prevent unbounded memory growth
+        if len(rate_limit_hits) > RATE_LIMIT_MAX_KEYS:
+            stale_keys = [
+                k for k, v in rate_limit_hits.items()
+                if not v or v[-1] < window_start
+            ]
+            for k in stale_keys:
+                del rate_limit_hits[k]
+
         hits = rate_limit_hits.setdefault(key, deque())
         while hits and hits[0] < window_start:
             hits.popleft()
@@ -165,6 +180,72 @@ def _rate_limit_response():
             response.headers["Retry-After"] = str(retry_after)
             return response, 429
         hits.append(now)
+    return None
+
+
+def _base64url_decode(value: str) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(value + padding)
+
+
+def _verify_supabase_access_token(token: str) -> dict:
+    if not SUPABASE_JWT_SECRET:
+        raise ValueError("Supabase JWT secret is not configured on the server")
+
+    try:
+        header_b64, payload_b64, signature_b64 = token.split(".")
+        header = json.loads(_base64url_decode(header_b64))
+        payload = json.loads(_base64url_decode(payload_b64))
+        signature = _base64url_decode(signature_b64)
+    except (ValueError, json.JSONDecodeError, binascii.Error) as error:
+        raise ValueError("Invalid access token") from error
+
+    if header.get("alg") != "HS256":
+        raise ValueError("Unsupported access token algorithm")
+
+    signed = f"{header_b64}.{payload_b64}".encode("ascii")
+    expected_signature = hmac.new(
+        SUPABASE_JWT_SECRET.encode("utf-8"),
+        signed,
+        hashlib.sha256,
+    ).digest()
+    if not hmac.compare_digest(signature, expected_signature):
+        raise ValueError("Invalid access token signature")
+
+    now = int(time.time())
+    if int(payload.get("exp", 0)) <= now:
+        raise ValueError("Access token has expired")
+    if payload.get("role") not in {"authenticated", "service_role"}:
+        raise ValueError("Access token is not an authenticated user")
+    if not payload.get("sub"):
+        raise ValueError("Access token subject is missing")
+    return payload
+
+
+def _request_access_token() -> str:
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.lower().startswith("bearer "):
+        return auth_header.split(" ", 1)[1].strip()
+    return request.args.get("access_token", "").strip()
+
+
+def _auth_error_response(message: str, status_code: int = 401):
+    return jsonify({"success": False, "error": message}), status_code
+
+
+def _require_authenticated_operator():
+    if not SUPABASE_AUTH_REQUIRED:
+        return None
+
+    token = _request_access_token()
+    if not token:
+        return _auth_error_response("Sign in is required to use this API")
+
+    try:
+        request.operator = _verify_supabase_access_token(token)
+    except ValueError as error:
+        status = 503 if "not configured" in str(error) else 401
+        return _auth_error_response(str(error), status)
     return None
 
 
@@ -453,6 +534,10 @@ def enforce_request_security():
         limited_response = _rate_limit_response()
         if limited_response is not None:
             return limited_response
+        if request.endpoint not in {"health", "info"}:
+            auth_response = _require_authenticated_operator()
+            if auth_response is not None:
+                return auth_response
 
     return None
 
@@ -1012,6 +1097,9 @@ def health():
             "model_loaded": session is not None,
             "model": MODEL_PATH.name,
             "notifications": _notification_status(),
+            "auth": {
+                "required": SUPABASE_AUTH_REQUIRED,
+            },
         }
     )
 
@@ -1025,23 +1113,14 @@ def info():
             "description": "Fire and smoke detection using ONNX Runtime",
             "confidence_threshold": CONFIDENCE_THRESHOLD,
             "inference_size": INFERENCE_SIZE,
-            "model_input_shape": input_shape,
-            "model_warmup": MODEL_WARMUP,
             "notifications": _notification_status(),
-            "endpoints": {
-                "/api/detect": "POST multipart/form-data or JSON base64 image",
-                "/api/history": "GET or DELETE detection history",
-                "/api/health": "GET service and model health",
-                "/api/info": "GET API configuration",
-                "/api/notifications/test": "POST test server-side notifications",
+            "auth": {
+                "provider": "supabase",
+                "required": SUPABASE_AUTH_REQUIRED,
             },
         }
     )
 
-
-@app.errorhandler(413)
-def request_too_large(_error):
-    return jsonify({"success": False, "error": "The upload exceeds the server size limit"}), 413
 
 
 @app.after_request
